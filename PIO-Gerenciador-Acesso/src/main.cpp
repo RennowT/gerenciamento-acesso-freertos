@@ -43,6 +43,8 @@ Preferences flashStorage;           // Flash storage object
 void taskMenu(void *pvParameter);
 void displayMenu();
 void registerUser();
+void listUsers();
+void taskFlash(void *pvParameters);
 
 // Task 1: Menu - Manages the serial interface and user interactions
 void taskMenu(void *pvParameter) {
@@ -64,7 +66,8 @@ void taskMenu(void *pvParameter) {
                 case '1':
                     registerUser(); // Trigger user registration flow
                     break;
-                case '2': // Placeholder for user listing (to be implemented)
+                case '2':
+                    listUsers();    // Trigger user list flow
                     break;
                 case '3': // Placeholder for event logging (to be implemented)
                     break;
@@ -149,6 +152,25 @@ void registerUser() {
     xSemaphoreGive(flashSemaphore); // Release semaphore to trigger Flash task
 
     Serial.println("\nUsuário cadastrado com sucesso!"); // Success message
+}
+
+void listUsers() {
+    // Check if there are no users
+    if (usersCount == 0) {
+        Serial.println("\nNenhum usuário cadastrado!");
+        return;
+    }
+
+    Serial.println("\n=== USUÁRIOS CADASTRADOS ===");
+    for(int i = 0; i < usersCount; i++) {
+        Serial.print(i + 1);
+        Serial.print(". Nome: ");
+        Serial.print(users[i].name);
+        Serial.print(" | Senha: ");
+        Serial.print(users[i].password);
+        Serial.print(" | Admin: ");
+        Serial.println(users[i].isAdmin ? "Sim" : "Não");
+    }
 }
 
 // Task 2: Flash - Manages data storage on Flash memory
