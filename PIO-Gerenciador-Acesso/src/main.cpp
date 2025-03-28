@@ -3,6 +3,7 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <Preferences.h>
 
 // Hardware definitions
 #define LED_ROOM_1 13
@@ -16,9 +17,27 @@ typedef struct {
     bool isAdmin;
 } User;
 
+typedef enum {
+    USER_DATA,
+    EVENT_DATA
+} DataType; // Enum to differentiate data types for Flash
+
+typedef struct {
+    DataType type;      // Data type identifier
+    union {
+        User user;      // User struct
+        // Event event; // Event struct (to be implemented)
+    } data;
+} FlashMessage;         // Struct to store data for Flash
+
 // Global Variables
 User users[10];
 uint8_t usersCount = 0;
+
+// FreeRTOS
+QueueHandle_t flashQueue;           // Queue to store data for Flash
+SemaphoreHandle_t flashSemaphore;   // Semaphore to protect Flash access
+Preferences flashStorage;           // Flash storage object
 
 // Function Prototypes
 void taskMenu(void *pvParameter);
@@ -116,13 +135,55 @@ void registerUser() {
     // Save user and provide feedback
     users[usersCount] = newUser;
     usersCount++;
+
+    // Save user data to Flash
+    FlashMessage msg;
+    msg.type = USER_DATA;
+    msg.data.user = newUser;
+
+    if (xQueueSend(flashQueue, &msg, portMAX_DELAY) != pdTRUE) {
+        Serial.println("\nErro ao salvar usuário!"); // Error message
+        return;
+    }
+
+    xSemaphoreGive(flashSemaphore); // Release semaphore to trigger Flash task
+
     Serial.println("\nUsuário cadastrado com sucesso!"); // Success message
+}
+
+// Task 2: Flash - Manages data storage on Flash memory
+void taskFlash(void *pvParameters) {
+    FlashMessage receivedMsg; //Buffer to store received messages
+
+    while (true) {
+        // Wait Semaphore to access Flash
+        xSemaphoreTake(flashSemaphore, portMAX_DELAY);
+
+        // Process all messages in the queue
+        while (xQueueReceive(flashQueue, &receivedMsg, 0) == pdTRUE) {
+            switch (receivedMsg.type) {
+                case USER_DATA:
+                    // Save user data to Flash
+                    flashStorage.begin("users", false);                                         // Open Flash for writing
+                    String key = "user_" + String(flashStorage.getUChar("count", 0));           // Generate key for user data
+                    flashStorage.putBytes(key.c_str(), &receivedMsg.data.user, sizeof(User));   // Save data
+                    flashStorage.putUChar("count", flashStorage.getUChar("count", 0) + 1);      // Increment user count
+                    flashStorage.end();                                                         // Close Flash access
+                    break;
+
+                //case EVENT_DATA: (to be implemented)
+            }
+        }
+    }
 }
 
 // Setup
 
 void setup() {
+    // Serial configuration
     Serial.begin(115200);
+
+    // GPIO configuration
     pinMode(LED_ROOM_1, OUTPUT);
     pinMode(LED_ROOM_2, OUTPUT);
     pinMode(BUTTON_ROOM_1, INPUT_PULLUP);
@@ -131,7 +192,22 @@ void setup() {
     digitalWrite(LED_ROOM_1, LOW);
     digitalWrite(LED_ROOM_2, LOW);
 
-    xTaskCreate(taskMenu, "Menu", 4096, NULL, 1, NULL);
+    // FreeRTOS configuration
+    flashQueue = xQueueCreate(10, sizeof(FlashMessage));    // Queue for 10 itens
+    flashSemaphore = xSemaphoreCreateBinary();              // Binary semaphore for Flash access
+
+    // Charge users from Flash
+    flashStorage.begin("users", true);              // Read-only mode
+    usersCount = flashStorage.getUChar("count", 0); // Read user count from Flash
+    for (int i = 0; i < usersCount; i++) {
+        String key = "user_" + String(i); // Generate key for user data
+        flashStorage.getBytes(key.c_str(), &users[i], sizeof(User)); // Recover data
+    }
+    flashStorage.end(); // Close Flash access
+
+    // Create tasks
+    xTaskCreate(taskMenu, "Menu", 4096, NULL, 2, NULL);
+    xTaskCreate(taskFlash, "Flash", 4096, NULL, 1, NULL);
 }
 
 void loop() {
