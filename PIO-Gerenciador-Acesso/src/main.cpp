@@ -9,13 +9,16 @@
 #define LED_ROOM_1 13
 #define LED_ROOM_2 14
 #define BUTTON_ROOM_1 26
-#define BUTTON_ROOM_2 35
+#define BUTTON_ROOM_2 25
+
+// Definitions
+#define DOOR_OPEN_TIME 5000
 
 typedef struct {
     char name[20];
     char password[20];
     bool isAdmin;
-} User;
+} User;                 // Struct to represent a user
 
 typedef enum {
     USER_DATA,
@@ -30,9 +33,16 @@ typedef struct {
     } data;
 } FlashMessage;         // Struct to store data for Flash
 
+typedef enum {
+    CLOSED,
+    OPEN
+} DoorState; // Enum to door state
+
 // Global Variables
 User users[10];
 uint8_t usersCount = 0;
+DoorState door1State = CLOSED;
+DoorState door2State = CLOSED;
 
 // FreeRTOS
 QueueHandle_t flashQueue;           // Queue to store data for Flash
@@ -44,6 +54,8 @@ void taskMenu(void *pvParameter);
 void displayMenu();
 void registerUser();
 void listUsers();
+bool authenticateUser();
+void controlDoor(uint8_t doorNumber, uint8_t ledPin, uint8_t buttonPin, DoorState* state);
 void taskFlash(void *pvParameters);
 
 // Task 1: Menu - Manages the serial interface and user interactions
@@ -71,9 +83,11 @@ void taskMenu(void *pvParameter) {
                     break;
                 case '3': // Placeholder for event logging (to be implemented)
                     break;
-                case '4': // Placeholder for door 1 control (to be implemented)
+                case '4':
+                    controlDoor(1, LED_ROOM_1, BUTTON_ROOM_1, &door1State); // Trigger authentication flow and port 1 control
                     break;
-                case '5': // Placeholder for door 2 control (to be implemented)
+                case '5': 
+                    controlDoor(2, LED_ROOM_2, BUTTON_ROOM_2, &door2State); // Trigger authentication flow and port 2 control
                     break;
                 default:
                     Serial.println("\nOpção inválida!"); // User feedback for invalid input
@@ -154,6 +168,7 @@ void registerUser() {
     Serial.println("\nUsuário cadastrado com sucesso!"); // Success message
 }
 
+// Function to List Users
 void listUsers() {
     // Check if there are no users
     if (usersCount == 0) {
@@ -171,6 +186,56 @@ void listUsers() {
         Serial.print(" | Admin: ");
         Serial.println(users[i].isAdmin ? "Sim" : "Não");
     }
+}
+
+// Função de Autenticação
+bool authenticateUser() {
+    while(Serial.available()) Serial.read(); // Clear serial buffer
+
+    String inputPassword;
+    Serial.print("\nDigite a senha:");
+
+    // Collect password for authentication
+    while (Serial.available() == 0) { vTaskDelay(10); }
+    inputPassword = Serial.readStringUntil('\n');
+    inputPassword.trim();
+
+    // Checks if the password exists for any user
+    for (int i = 0; i < usersCount; i++) {
+        if (inputPassword.equals(users[i].password)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void controlDoor(uint8_t doorNumber, uint8_t ledPin, uint8_t buttonPin, DoorState* state) {
+    // Authenticate user
+    if (!authenticateUser()) {
+        Serial.println("\nAcesso negado! Senha invalida.");
+        return;
+    }
+
+    // Open the door
+    Serial.println("\nAcesso liberado!");
+    digitalWrite(ledPin, HIGH);
+    *state = OPEN;
+
+    // 5 second timer
+    uint32_t startTime = xTaskGetTickCount();
+    while ((xTaskGetTickCount() - startTime) < pdMS_TO_TICKS(DOOR_OPEN_TIME)) {
+        // Checks if the button was pressed
+        if (digitalRead(buttonPin) == LOW) { // Button pressed
+            break;
+        }
+        vTaskDelay(50); // Does not block other tasks
+    }
+
+    // Close the door
+    digitalWrite(ledPin, LOW);
+    *state = CLOSED;
+    Serial.println("\nPorta fechada.");
 }
 
 // Task 2: Flash - Manages data storage on Flash memory
