@@ -1,4 +1,7 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -48,11 +51,50 @@ User users[10];
 uint8_t usersCount = 0;
 DoorState door1State = CLOSED;
 DoorState door2State = CLOSED;
+bool wifiConnected = false;
+
+// Wi-Fi Credentials
+const char* ssid = "";
+const char* password = "";
+
+// Webserver
+AsyncWebServer server(80);
+
+// HTML page with PROGMEM
+const char webpage[] PROGMEM = R"rawliteral(
+    <!DOCTYPE HTML>
+    <html>
+    <head>
+      <title>Controle de Portas</title>
+    </head>
+    <body>
+      <h1>Controle Remoto</h1>
+      <button onclick="control(1)">Abrir Porta 1</button>
+      <button onclick="control(2)">Abrir Porta 2</button>
+      <script>
+        function control(port) {
+          const button = event.target;
+          const action = button.innerHTML.includes("Abrir") ? "on" : "off";
+          
+          fetch(`/porta${port}/${action}`)
+            .then(response => {
+              button.innerHTML = action === "on" 
+                ? `Fechar Porta ${port}` 
+                : `Abrir Porta ${port}`;
+            })
+            .catch(error => console.log('Erro:', error));
+        }
+      </script>
+    </body>
+    </html>
+    )rawliteral";
 
 // FreeRTOS
 QueueHandle_t flashQueue;           // Queue to store data for Flash
 SemaphoreHandle_t flashSemaphore;   // Semaphore to protect Flash access
 Preferences flashStorage;           // Flash storage object
+SemaphoreHandle_t doorMutex;        // Semaphore to ports control
+SemaphoreHandle_t wifiConnectedSemaphore;
 
 // Function Prototypes
 void taskMenu(void *pvParameter);
@@ -63,12 +105,16 @@ void listEvents();
 int authenticateUser();
 void controlDoor(uint8_t doorNumber, uint8_t ledPin, uint8_t buttonPin, DoorState* state);
 void taskFlash(void *pvParameters);
+void taskWebServer(void *pvParameters);
 
 // Task 1: Menu - Manages the serial interface and user interactions
 void taskMenu(void *pvParameter) {
     bool menuVisible = true; // Controls menu visibility state
 
     while (true) {
+        // Waiting for Wi-Fi connection
+        xSemaphoreTake(wifiConnectedSemaphore, portMAX_DELAY);
+
         // Display menu only when required (avoids spamming the serial monitor)
         if (menuVisible) {
             displayMenu();
@@ -354,8 +400,73 @@ void taskFlash(void *pvParameters) {
     }
 }
 
-// Setup
+// Task 3: Webserver
+void taskWebServer(void *pvParameters) {
+    // Attempt to connect to configured WiFi network
+    Serial.println("Conectando ao Wi-Fi...");
+    WiFi.begin(ssid, password);
 
+    // Wait persistently for connection establishment
+    while (WiFi.status() != WL_CONNECTED) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        Serial.print(".");
+    }
+
+    // Connection established
+    Serial.println("\nConectado! IP: ");
+    Serial.println(WiFi.localIP());
+
+    // HTTP Route Configuration
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send_P(200, "text/html", webpage); // Send pre-stored HTML
+    });
+
+    // Door 1 Control Endpoints
+    server.on("/porta1/on", HTTP_GET, [](AsyncWebServerRequest *request){
+        xSemaphoreTake(doorMutex, portMAX_DELAY);           // Acquire door mutex
+        digitalWrite(LED_ROOM_1, HIGH);                     // Physically open door
+        door1State = OPEN;                                  // Update state
+        xSemaphoreGive(doorMutex);                          // Release mutex
+        request->send(200, "text/plain", "Porta 1 aberta"); // Confirm action
+    });
+
+    server.on("/porta1/off", HTTP_GET, [](AsyncWebServerRequest *request){
+        xSemaphoreTake(doorMutex, portMAX_DELAY);
+        digitalWrite(LED_ROOM_1, LOW);                      // Physically close door
+        door1State = CLOSED;
+        xSemaphoreGive(doorMutex);
+        request->send(200, "text/plain", "Porta 1 fechada");
+    });
+
+    // Door 2 Control Endpoints (mirror door 1 functionality)
+    server.on("/porta2/on", HTTP_GET, [](AsyncWebServerRequest *request){
+        xSemaphoreTake(doorMutex, portMAX_DELAY);
+        digitalWrite(LED_ROOM_2, HIGH);
+        door2State = OPEN;
+        xSemaphoreGive(doorMutex);
+        request->send(200, "text/plain", "Porta 2 aberta");
+    });
+
+    server.on("/porta2/off", HTTP_GET, [](AsyncWebServerRequest *request){
+        xSemaphoreTake(doorMutex, portMAX_DELAY);
+        digitalWrite(LED_ROOM_2, LOW);
+        door2State = CLOSED;
+        xSemaphoreGive(doorMutex);
+        request->send(200, "text/plain", "Porta 2 fechada");
+    });
+
+    // Server Initialization
+    wifiConnected = true;
+    xSemaphoreGive(wifiConnectedSemaphore); // Release o semaphore
+    server.begin(); // Start listening for incoming connections
+    
+    // Keep task alive with minimal resource usage
+    while(true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// Setup
 void setup() {
     // Serial configuration
     Serial.begin(115200);
@@ -372,6 +483,9 @@ void setup() {
     // FreeRTOS configuration
     flashQueue = xQueueCreate(10, sizeof(FlashMessage));    // Queue for 10 itens
     flashSemaphore = xSemaphoreCreateBinary();              // Binary semaphore for Flash access
+    doorMutex = xSemaphoreCreateMutex();                    // Mutex for door control
+    wifiConnectedSemaphore = xSemaphoreCreateBinary();      // BInary semaphore for initialization Menu
+    xSemaphoreTake(wifiConnectedSemaphore, 0);              // Starts blocked
 
     // Load users from Flash
     flashStorage.begin("users", true);                                  // Read-only mode
@@ -390,6 +504,7 @@ void setup() {
     // Create tasks
     xTaskCreate(taskMenu, "Menu", 4096, NULL, 2, NULL);
     xTaskCreate(taskFlash, "Flash", 4096, NULL, 1, NULL);
+    xTaskCreate(taskWebServer, "WebServer", 8192, NULL, 1, NULL);
 }
 
 void loop() {
