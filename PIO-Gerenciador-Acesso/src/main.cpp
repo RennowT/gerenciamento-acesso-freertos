@@ -18,7 +18,12 @@ typedef struct {
     char name[20];
     char password[20];
     bool isAdmin;
-} User;                 // Struct to represent a user
+} User; // Struct to represent a user
+
+typedef struct {
+    char userName[20];
+    uint8_t doorNumber;
+} Event; // Struct for door events
 
 typedef enum {
     USER_DATA,
@@ -29,7 +34,7 @@ typedef struct {
     DataType type;      // Data type identifier
     union {
         User user;      // User struct
-        // Event event; // Event struct (to be implemented)
+        Event event;    // Event struct (to be implemented)
     } data;
 } FlashMessage;         // Struct to store data for Flash
 
@@ -54,7 +59,7 @@ void taskMenu(void *pvParameter);
 void displayMenu();
 void registerUser();
 void listUsers();
-bool authenticateUser();
+int authenticateUser();
 void controlDoor(uint8_t doorNumber, uint8_t ledPin, uint8_t buttonPin, DoorState* state);
 void taskFlash(void *pvParameters);
 
@@ -189,7 +194,7 @@ void listUsers() {
 }
 
 // Função de Autenticação
-bool authenticateUser() {
+int authenticateUser() {
     while(Serial.available()) Serial.read(); // Clear serial buffer
 
     String inputPassword;
@@ -203,19 +208,31 @@ bool authenticateUser() {
     // Checks if the password exists for any user
     for (int i = 0; i < usersCount; i++) {
         if (inputPassword.equals(users[i].password)) {
-            return true;
+            return i; // Returns the user index
         }
     }
 
-    return false;
+    return -1; // Authentication failed
 }
 
 void controlDoor(uint8_t doorNumber, uint8_t ledPin, uint8_t buttonPin, DoorState* state) {
     // Authenticate user
-    if (!authenticateUser()) {
+    int userIndex = authenticateUser();
+    if (userIndex < 0) {
         Serial.println("\nAcesso negado! Senha invalida.");
         return;
     }
+
+    // Create and send event
+    FlashMessage eventMsg;
+    eventMsg.type = EVENT_DATA;
+    strncpy(eventMsg.data.event.userName, users[userIndex].name, sizeof(eventMsg.data.event.userName)); // Copies the authenticated user name to the event 
+    eventMsg.data.event.doorNumber = doorNumber;
+
+    if (xQueueSend(flashQueue, &eventMsg, portMAX_DELAY) != pdTRUE) {
+        Serial.println("\nErro ao registrar evento!");
+    }
+    xSemaphoreGive(flashSemaphore);
 
     // Open the door
     Serial.println("\nAcesso liberado!");
@@ -249,7 +266,7 @@ void taskFlash(void *pvParameters) {
         // Process all messages in the queue
         while (xQueueReceive(flashQueue, &receivedMsg, 0) == pdTRUE) {
             switch (receivedMsg.type) {
-                case USER_DATA:
+                case USER_DATA: {
                     // Save user data to Flash
                     flashStorage.begin("users", false);                                         // Open Flash for writing
                     String key = "user_" + String(flashStorage.getUChar("count", 0));           // Generate key for user data
@@ -257,8 +274,17 @@ void taskFlash(void *pvParameters) {
                     flashStorage.putUChar("count", flashStorage.getUChar("count", 0) + 1);      // Increment user count
                     flashStorage.end();                                                         // Close Flash access
                     break;
+                }
 
-                //case EVENT_DATA: (to be implemented)
+                case EVENT_DATA: {
+                    // Save event data to Flash
+                    flashStorage.begin("events", false);                                                // Open Flash for writing
+                    String eventKey = "event_" + String(flashStorage.getUChar("event_count", 0));       // Generate key for event data
+                    flashStorage.putBytes(eventKey.c_str(), &receivedMsg.data.event, sizeof(Event));    // Save data
+                    flashStorage.putUChar("event_count", flashStorage.getUChar("event_count", 0) + 1);  // Increment event count
+                    flashStorage.end();                                                                 // Close Flash access
+                    break;
+                }
             }
         }
     }
@@ -283,13 +309,18 @@ void setup() {
     flashQueue = xQueueCreate(10, sizeof(FlashMessage));    // Queue for 10 itens
     flashSemaphore = xSemaphoreCreateBinary();              // Binary semaphore for Flash access
 
-    // Charge users from Flash
-    flashStorage.begin("users", true);              // Read-only mode
-    usersCount = flashStorage.getUChar("count", 0); // Read user count from Flash
+    // Load users from Flash
+    flashStorage.begin("users", true);                                  // Read-only mode
+    usersCount = flashStorage.getUChar("count", 0);                     // Read user count from Flash
     for (int i = 0; i < usersCount; i++) {
-        String key = "user_" + String(i); // Generate key for user data
-        flashStorage.getBytes(key.c_str(), &users[i], sizeof(User)); // Recover data
+        String key = "user_" + String(i);                               // Generate key for user data
+        flashStorage.getBytes(key.c_str(), &users[i], sizeof(User));    // Recover data
     }
+    flashStorage.end(); // Close Flash access
+
+    // Load event count from Flash
+    flashStorage.begin("events", true);                             // Read-onlu mode
+    uint8_t eventCount = flashStorage.getUChar("event_count", 0);   // Read event count from Flash
     flashStorage.end(); // Close Flash access
 
     // Create tasks
