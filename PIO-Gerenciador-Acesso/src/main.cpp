@@ -109,11 +109,12 @@ void taskWebServer(void *pvParameters);
 
 // Task 1: Menu - Manages the serial interface and user interactions
 void taskMenu(void *pvParameter) {
+    // Waiting for Wi-Fi connection
+    xSemaphoreTake(wifiConnectedSemaphore, portMAX_DELAY);
+
     bool menuVisible = true; // Controls menu visibility state
 
     while (true) {
-        // Waiting for Wi-Fi connection
-        xSemaphoreTake(wifiConnectedSemaphore, portMAX_DELAY);
 
         // Display menu only when required (avoids spamming the serial monitor)
         if (menuVisible) {
