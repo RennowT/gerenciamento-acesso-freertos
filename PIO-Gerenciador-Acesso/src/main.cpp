@@ -59,6 +59,7 @@ void taskMenu(void *pvParameter);
 void displayMenu();
 void registerUser();
 void listUsers();
+void listEvents();
 int authenticateUser();
 void controlDoor(uint8_t doorNumber, uint8_t ledPin, uint8_t buttonPin, DoorState* state);
 void taskFlash(void *pvParameters);
@@ -86,7 +87,8 @@ void taskMenu(void *pvParameter) {
                 case '2':
                     listUsers();    // Trigger user list flow
                     break;
-                case '3': // Placeholder for event logging (to be implemented)
+                case '3': 
+                    listEvents();   // Trigger event list flow
                     break;
                 case '4':
                     controlDoor(1, LED_ROOM_1, BUTTON_ROOM_1, &door1State); // Trigger authentication flow and port 1 control
@@ -193,6 +195,67 @@ void listUsers() {
     }
 }
 
+// Function to List Events
+void listEvents() {
+    // Authenticate user
+    int userIndex = authenticateUser();
+    if (userIndex < 0) {
+        Serial.println("\nAcesso negado! Senha invalida.");
+        return;
+    } else if (!users[userIndex].isAdmin) {
+        Serial.println("\nAcesso negado! Somente administradores.");
+        return;
+    }
+
+    // Load event count from Flash
+    Preferences flash;
+    flash.begin("events", true); // Read-onlu mode
+
+    uint8_t eventCount = flash.getUChar("event_count", 0); // Read event count from Flash
+    if (eventCount == 0) {
+        Serial.println("\nNenhum evento registrado!");
+        flash.end(); // Close Flash access
+        return;
+    }
+
+    Serial.println("\n=== EVENTOS ===");
+    for(int i = 0; i < eventCount; i++) {
+        Event evento;
+        String key = "event_" + String(i);
+        flash.getBytes(key.c_str(), &evento, sizeof(Event));
+
+        // Busca usuário correspondente
+        bool encontrado = false;
+        User usuario;
+        for(int j = 0; j < usersCount; j++) {
+            if(strcmp(users[j].name, evento.userName) == 0) {
+                usuario = users[j];
+                encontrado = true;
+                break;
+            }
+        }
+
+        // Exibe dados formatados
+        Serial.print(i+1);
+        Serial.print(". Usuário: ");
+        Serial.print(evento.userName);
+        
+        if(encontrado) {
+            Serial.print(" (");
+            Serial.print(usuario.isAdmin ? "Admin" : "Usuário");
+            Serial.print(")");
+        } else {
+            Serial.print(" [Não cadastrado]");
+        }
+        
+        Serial.print(" | Porta: ");
+        Serial.println(evento.doorNumber);
+    }
+    
+    flashStorage.end();
+    
+}
+
 // Função de Autenticação
 int authenticateUser() {
     while(Serial.available()) Serial.read(); // Clear serial buffer
@@ -226,7 +289,8 @@ void controlDoor(uint8_t doorNumber, uint8_t ledPin, uint8_t buttonPin, DoorStat
     // Create and send event
     FlashMessage eventMsg;
     eventMsg.type = EVENT_DATA;
-    strncpy(eventMsg.data.event.userName, users[userIndex].name, sizeof(eventMsg.data.event.userName)); // Copies the authenticated user name to the event 
+    strncpy(eventMsg.data.event.userName, users[userIndex].name, sizeof(eventMsg.data.event.userName) - 1); // Copies the authenticated user name to the event 
+    eventMsg.data.event.userName[sizeof(eventMsg.data.event.userName) - 1] = '\0';
     eventMsg.data.event.doorNumber = doorNumber;
 
     if (xQueueSend(flashQueue, &eventMsg, portMAX_DELAY) != pdTRUE) {
